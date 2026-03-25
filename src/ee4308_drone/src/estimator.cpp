@@ -164,6 +164,26 @@ namespace ee4308::drone
         }
 
         // if in range, write to Ysonar_, and do the KF correction.
+        // std::cout << "Ysonar " << Ysonar_ << std::endl;
+        Eigen::Vector2d H{1.0, 0.0};
+        double V = 1.0;
+        double R = this->var_sonar_;
+        Eigen::Vector2d Kz_ = this->Pz_ * H / 
+                (H.transpose() * this->Pz_ * H + V * R * V); // 2x1 Kz_
+        Eigen::Vector2d Xz_newposterior = this->Xz_ + Kz_ * (Ysonar_ - H.transpose() * this->Xz_); // H projects into sensor frame
+        Eigen::Matrix2d Pz_newposterior = this->Pz_ - Kz_ * H.transpose() * this->Pz_;
+        bool unsafe_value = (Xz_newposterior.array() > 1000000000).any() 
+                || (Xz_newposterior.array() < -1000000000).any() 
+                || (Pz_newposterior.array() > 1000000000).any()
+                || (Pz_newposterior.array() < -1000000000).any();
+        if (!unsafe_value) {
+            this->Xz_ = Xz_newposterior;
+            this->Pz_ = Pz_newposterior;
+        }
+        // std::cout << "Xz [ " << this->Xz_(0) << " " << this->Xz_(1) << " ]" << std::endl;
+        // std::cout << "Pz [ " << this->Pz_(0, 0) << " " << this->Pz_(0, 1) << " ; " 
+        //         << this->Pz_(1, 0) << " " << this->Pz_(1, 1) << " ]" << std::endl;
+        return;
     }
 
     // ================================ Magnetic sub callback / EKF Correction ========================================
@@ -221,22 +241,44 @@ namespace ee4308::drone
         if (dt < ee4308::THRES)
             return;
 
-        // NOT ALLOWED TO USE ORIENTATION FROM IMU as ORIENTATION IS DERIVED FROM ANGULAR VELOCTIY !!!
+        // sample use: this->Xz_ = v(0.0, 0.0); pos: Xz_(0); vel Xz_(1)
+        // std::cout << "x accel raw " << msg.linear_acceleration.x << std::endl;
+        // std::cout << "y accel raw " << msg.linear_acceleration.y << std::endl;
+        // std::cout << "z accel raw " << msg.linear_acceleration.z << std::endl;
+
+        double U_z = - msg.linear_acceleration.z + GRAVITY; // +ve is downwards!!
+        // double U_z = msg.linear_acceleration.z - GRAVITY; // +ve is downwards!!
+        Eigen::Matrix2d F{{1.0, dt}, {0.0, 1.0}};
+        Eigen::Vector2d W{0.5 * dt * dt, dt};
+        Eigen::Vector2d Xz_newprior = F * this->Xz_ + W * U_z;
+        double Qz_ = this->var_imu_z_;
+        Eigen::Matrix2d Pz_newprior = F * this->Pz_ * F.transpose() + W * Qz_ * W.transpose(); // 2x2
+        bool unsafe_value = (Xz_newprior.array() > 1000000000).any() 
+                || (Xz_newprior.array() < -1000000000).any() 
+                || (Pz_newprior.array() > 1000000000).any()
+                || (Pz_newprior.array() < -1000000000).any();
+        if (!unsafe_value) {
+            this->Xz_ = Xz_newprior;
+            this->Pz_ = Pz_newprior;
+        }
+        // std::cout << "Xz [ " << this->Xz_(0) << " " << this->Xz_(1) << " ]" << std::endl;
+        // std::cout << "Pz [ " << this->Pz_(0, 0) << " " << this->Pz_(0, 1) << " ; " 
+        //         << this->Pz_(1, 0) << " " << this->Pz_(1, 1) << " ]" << std::endl;
+        return;
+
+        // NOT ALLOWED TO USE msg.orientation
         // Store the states in Xx_, Xy_, Xz_, and Xa_ for terminal printing.
         // Store the covariances in Px_, Py_, Pz_, and Pa_ for terminal printing.
         // ==== make use of ====
-        // msg.linear_acceleration
-        // msg.angular_velocity
-        // GRAVITY
+        // msg.linear_acceleration - geometry_msgs/Vector3; in drone frame
+        // msg.angular_velocity - geometry_msgs/Vector3; in drone frame
+        // GRAVITY = 9.8 double const
         // var_imu_x_, var_imu_y_, var_imu_z_, var_imu_a_
         // Xx_, Xy_, Xz_, Xa_
         // Px_, Py_, Pz_, Pa_
         // dt
         // std::cos(), std::sin()
         // =========
-
-        // rewrite or delete the following
-        (void) msg;
     }
 
     void Estimator::callbackSubTrueOdom_(const nav_msgs::msg::Odometry msg)

@@ -14,6 +14,7 @@
 #include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/nav_sat_fix.hpp" // gps
 #include "sensor_msgs/msg/laser_scan.hpp"  // sonar (gz has no sonar implementation. laserscan for quick hack.)
+// #define EIGEN_INITIALIZE_MATRICES_BY_ZERO
 #include "eigen3/Eigen/Dense"
 #include "ee4308_drone/core.hpp"
 
