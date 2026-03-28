@@ -46,12 +46,15 @@ namespace ee4308::drone
         Eigen::Matrix2d Py_;
         Eigen::Matrix2d Pa_;
         Eigen::Matrix2d Pz_;
+        Eigen::Matrix3d Pzz_;
         Eigen::Vector3d initial_ECEF_;
         Eigen::Vector3d initial_position_;
         Eigen::Vector3d Ygps_;
         double Ymagnet_;
         double Ybaro_;
         double Ysonar_;
+        double bias_b_;
+
         double last_predict_time_;
         bool initialized_ecef_;
         bool initialized_magnetic_;

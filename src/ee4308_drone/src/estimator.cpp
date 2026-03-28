@@ -53,12 +53,14 @@ namespace ee4308::drone
         this->Px_ = Eigen::Matrix2d::Constant(1e3),
         this->Py_ = Eigen::Matrix2d::Constant(1e3),
         this->Pz_ = Eigen::Matrix2d::Constant(1e3);
+        this->Pzz_ = Eigen::Matrix3d::Constant(1e3);
         this->Pa_ = Eigen::Matrix2d::Constant(1e3);
         this->initial_ECEF_ << NAN, NAN, NAN;
         this->Ygps_ << NAN, NAN, NAN;
         this->Ymagnet_ = NAN;
         this->Ybaro_ = NAN;
         this->Ysonar_ = NAN;
+        this->bias_b_ = 0.0;
 
         this->last_predict_time_ = this->now().seconds();
         this->initialized_ecef_ = false;
@@ -219,7 +221,7 @@ namespace ee4308::drone
 
         // if in range, write to Ysonar_, and do the KF correction.
         // std::cout << "Ysonar " << Ysonar_ << std::endl;
-        Eigen::Vector2d H{1.0, 0.0};
+        Eigen::Vector2d H{1.0, 0.0}; // transposed as no 1x2
         double V = 1.0;
         double R = this->var_sonar_;
         Eigen::Vector2d Kz_ = this->Pz_ * H / 
@@ -261,8 +263,28 @@ namespace ee4308::drone
         // limitAngle()
         // =========
 
-        // rewrite or delete the following:
-        (void) msg;
+        Eigen::Vector2d H{1.0, 0.0}; // transposed as  no 1x2
+        double V = 1.0;
+        double R = this->var_magnet_; // variance
+        // calculate heading
+        double Ya_ = ee4308::limitAngle(std::atan2(msg.magnetic_field.y, msg.magnetic_field.x)); // radians
+        // update Xa_, Pa_
+        Eigen::Vector2d Ka_ = this->Pa_ * H / 
+                (H.transpose() * this->Pa_ * H + V * R * V); // 2x1 Kz_
+        Eigen::Vector2d Xa_newposterior = this->Xa_ + Ka_ * (Ya_ - H.transpose() * this->Xa_); // H projects into sensor frame
+        Eigen::Matrix2d Pa_newposterior = this->Pa_ - Ka_ * H.transpose() * this->Pa_;
+        bool unsafe_value = (Xa_newposterior.array() > 1000000000).any() 
+                || (Xa_newposterior.array() < -1000000000).any() 
+                || (Pa_newposterior.array() > 1000000000).any()
+                || (Pa_newposterior.array() < -1000000000).any();
+        if (!unsafe_value) {
+            this->Xa_ = Xa_newposterior;
+            this->Pa_ = Pa_newposterior;
+        }
+        // std::cout << "Xa [ " << this->Xa_(0) << " " << this->Xa_(1) << " ]" << std::endl;
+        // std::cout << "Pa [ " << this->Pa_(0, 0) << " " << this->Pa_(0, 1) << " ; " 
+        //         << this->Pa_(1, 0) << " " << this->Pa_(1, 1) << " ]" << std::endl;
+        return;
     }
 
     // ================================ Baro sub callback / EKF Correction ========================================
@@ -281,8 +303,31 @@ namespace ee4308::drone
         // .transpose()
         // =========
 
-        // rewrite or delete the following
-        (void) msg;
+        this->Ybaro_ = 44330 * (1 - std::pow(msg.fluid_pressure / SEA_LEVEL_PA, 0.1903));
+        // H = partial Y / partial X
+        Eigen::Vector3d H{1.0, 0.0, 1.0}; // to be transposed as 1x3
+        double V = 1.0;
+        double R = this->var_baro_;
+        Eigen::Vector3d Xzz_{this->Xz_(0), this->Xz_(1), this->bias_b_}; // new bias tracker
+
+        Eigen::Vector3d Kzz_ = this->Pzz_ * H / 
+                (H.transpose() * this->Pzz_ * H + V * R * V); // 3x1 Kz_
+        Eigen::Vector3d Xzz_newposterior = Xzz_ + Kzz_ * (Ybaro_ - H.transpose() * Xzz_); // H projects into sensor frame
+        Eigen::Matrix3d Pzz_newposterior = this->Pzz_ - Kzz_ * H.transpose() * this->Pzz_;
+        bool unsafe_value = (Xzz_newposterior.array() > 1000000000).any() 
+                || (Xzz_newposterior.array() < -1000000000).any() 
+                || (Pzz_newposterior.array() > 1000000000).any()
+                || (Pzz_newposterior.array() < -1000000000).any();
+        if (!unsafe_value) {
+            this->Xz_ << Xzz_newposterior(0), Xzz_newposterior(1);
+            this->bias_b_ = Xzz_newposterior(2);
+            this->Pzz_ = Pzz_newposterior;
+        }
+        // std::cout << "Xzz [ " << Xzz_newposterior(0) << " " << Xzz_newposterior(1) << " " << Xzz_newposterior(2) << " ]" << std::endl;
+        // std::cout << "Pzz [ " << this->Pzz_(0, 0) << " " << this->Pzz_(0, 1) << " " << this->Pzz_(0, 2) << " ; " 
+        //                       << this->Pzz_(1, 0) << " " << this->Pzz_(1, 1) << " " << this->Pzz_(1, 2) << " ; " 
+        //                       << this->Pzz_(2, 0) << " " << this->Pzz_(2, 1) << " " << this->Pzz_(2, 2) << " ]" << std::endl;
+        return;
     }
 
     // ================================ IMU sub callback / EKF Prediction ========================================
@@ -300,6 +345,7 @@ namespace ee4308::drone
         // std::cout << "y accel raw " << msg.linear_acceleration.y << std::endl;
         // std::cout << "z accel raw " << msg.linear_acceleration.z << std::endl;
 
+        // Z position/velocity
         double U_z = - msg.linear_acceleration.z + GRAVITY; // +ve is downwards!!
         // double U_z = msg.linear_acceleration.z - GRAVITY; // +ve is downwards!!
         Eigen::Matrix2d F{{1.0, dt}, {0.0, 1.0}};
@@ -318,6 +364,62 @@ namespace ee4308::drone
         // std::cout << "Xz [ " << this->Xz_(0) << " " << this->Xz_(1) << " ]" << std::endl;
         // std::cout << "Pz [ " << this->Pz_(0, 0) << " " << this->Pz_(0, 1) << " ; " 
         //         << this->Pz_(1, 0) << " " << this->Pz_(1, 1) << " ]" << std::endl;
+
+        // X AND Y position/velocity
+        Eigen::Matrix2d rotXY{{std::cos(this->Xa_(0)), -std::sin(this->Xa_(0))},
+                              {std::sin(this->Xa_(0)), std::cos(this->Xa_(0))}};
+        Eigen::Vector2d U_xy{msg.linear_acceleration.x, msg.linear_acceleration.y};
+        Eigen::Vector2d a_xy = rotXY * U_xy; // 2x1, in world frame
+        double a_x{a_xy(0)};
+        double a_y{a_xy(1)};
+        Eigen::Vector2d Xx_newprior = F * this->Xx_ + W * a_x;
+        Eigen::Vector2d Xy_newprior = F * this->Xy_ + W * a_y;
+        double Qx_ = this->var_imu_x_;
+        double Qy_ = this->var_imu_y_; // TODO: diagonal covariance?
+        Eigen::Matrix2d Px_newprior = F * this->Px_ * F.transpose() + W * Qx_ * W.transpose(); // 2x2
+        Eigen::Matrix2d Py_newprior = F * this->Py_ * F.transpose() + W * Qy_ * W.transpose(); // 2x2
+        unsafe_value = (Xx_newprior.array() > 1000000000).any() 
+                || (Xx_newprior.array() < -1000000000).any() 
+                || (Px_newprior.array() > 1000000000).any()
+                || (Px_newprior.array() < -1000000000).any()
+                || (Xy_newprior.array() > 1000000000).any() 
+                || (Xy_newprior.array() < -1000000000).any() 
+                || (Py_newprior.array() > 1000000000).any()
+                || (Py_newprior.array() < -1000000000).any();
+        if (!unsafe_value) {
+            this->Xx_ = Xx_newprior;
+            this->Px_ = Px_newprior;
+            this->Xy_ = Xy_newprior;
+            this->Py_ = Py_newprior;
+        }
+
+        // std::cout << "Xx [ " << this->Xx_(0) << " " << this->Xx_(1) << " ]" << std::endl;
+        // std::cout << "Px [ " << this->Px_(0, 0) << " " << this->Px_(0, 1) << " ; " 
+        //         << this->Px_(1, 0) << " " << this->Px_(1, 1) << " ]" << std::endl;
+        // std::cout << "Xy [ " << this->Xy_(0) << " " << this->Xy_(1) << " ]" << std::endl;
+        // std::cout << "Py [ " << this->Py_(0, 0) << " " << this->Py_(0, 1) << " ; " 
+        //         << this->Py_(1, 0) << " " << this->Py_(1, 1) << " ]" << std::endl;
+
+        // yaw from angular_velocity
+        // std::cout << "Xa angular velocity z " << msg.angular_velocity.z << std::endl;
+        double U_a = msg.angular_velocity.z; // +ve is ACW, usually limited to 0.8 rad/s with teleop
+        Eigen::Matrix2d Fa{{1.0, 0.0}, {0.0, 0.0}}; // only preserve last orientation
+        Eigen::Vector2d Wa{dt, 1.0}; // from angular velocity not acceleration
+        Eigen::Vector2d Xa_newprior = Fa * this->Xa_ + Wa * U_a;
+        double Qa_ = this->var_imu_a_;
+        Eigen::Matrix2d Pa_newprior = Fa * this->Pa_ * Fa.transpose() + Wa * Qa_ * Wa.transpose(); // 2x2
+        unsafe_value = (Xa_newprior.array() > 1000000000).any() 
+                || (Xa_newprior.array() < -1000000000).any() 
+                || (Pa_newprior.array() > 1000000000).any()
+                || (Pa_newprior.array() < -1000000000).any();
+        if (!unsafe_value) {
+            this->Xa_ = Xa_newprior;
+            this->Pa_ = Pa_newprior;
+        }
+        // std::cout << "Xa [ " << this->Xa_(0) << " " << this->Xa_(1) << " ]" << std::endl;
+        // std::cout << "Pa [ " << this->Pa_(0, 0) << " " << this->Pa_(0, 1) << " ; " 
+        //         << this->Pa_(1, 0) << " " << this->Pa_(1, 1) << " ]" << std::endl;
+
         return;
 
         // NOT ALLOWED TO USE msg.orientation
